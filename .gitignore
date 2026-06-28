@@ -1,0 +1,33 @@
+# Build artifacts
+/target
+**/target
+**/node_modules
+**/dist
+
+# macOS / Linux noise
+.DS_Store
+Thumbs.db
+
+# Local editor / scratch
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build / bundle outputs
+target/release/bundle/
+
+# Local SQLite store
+*.db
+*.db-shm
+*.db-wal
+
+# Vite dev cache
+.vite/
+
+# Local scratch / verification configs
+/tmp/
+
+# Build / runtime logs
+*.log
+ui/tmp/

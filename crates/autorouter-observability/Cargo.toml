@@ -1,0 +1,25 @@
+[package]
+name = "autorouter-observability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Logging, metrics, and benchmarking primitives for AutoRouter."
+
+[dependencies]
+autorouter-core = { path = "../autorouter-core" }
+autorouter-config = { path = "../autorouter-config" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+autorouter-translate = { path = "../autorouter-translate" }
+serde_json = { workspace = true }
+tempfile = "3"
+
+[[bench]]
+name = "translate"
+harness = false

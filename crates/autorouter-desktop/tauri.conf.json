@@ -1,0 +1,97 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AutoRouter",
+  "version": "0.1.0",
+  "identifier": "com.autorouter.desktop",
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AutoRouter",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 940,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "center": true,
+        "label": "main"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' tauri: http://tauri.localhost ipc: http://ipc.localhost; img-src 'self' data: tauri: http://tauri.localhost asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://localhost:* http://127.0.0.1:* tauri: http://tauri.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' tauri: http://tauri.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon-bg-32.png",
+      "icons/icon-bg-128.png",
+      "icons/icon-bg-256.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "copyright": "(c) 2026 AutoRouter",
+    "shortDescription": "Local-first AI protocol router",
+    "longDescription": "AutoRouter is a local-first AI protocol translation and routing engine. It emulates the OpenAI, Anthropic, and Gemini APIs on a single local endpoint and forwards each request to the right upstream.",
+    "publisher": "AutoRouter",
+    "homepage": "https://github.com/suyashkelvinsavant/autorouter",
+    "licenseFile": "../../LICENSE",
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "perMachine",
+        "languages": [
+          "English"
+        ]
+      },
+      "wix": {
+        "language": [
+          "en-US"
+        ],
+        "fragmentPaths": []
+      },
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "allowDowngrades": true,
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "tsp": false
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null,
+      "entitlements": "info/entitlements.plist",
+      "exceptionDomain": "",
+      "dmg": {
+        "background": null,
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        }
+      },
+      "hardenedRuntime": true
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {}
+}

@@ -1,0 +1,42 @@
+[package]
+name = "autorouter-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AutoRouter desktop application - Tauri 2 shell hosting the local gateway and UI."
+
+[lib]
+name = "autorouter_desktop_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "autorouter-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+autorouter-server = { path = "../autorouter-server" }
+axum = { workspace = true }
+autorouter-config = { path = "../autorouter-config" }
+autorouter-core = { path = "../autorouter-core" }
+autorouter-translate = { path = "../autorouter-translate" }
+autorouter-router = { path = "../autorouter-router" }
+autorouter-observability = { path = "../autorouter-observability" }
+
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+tracing = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

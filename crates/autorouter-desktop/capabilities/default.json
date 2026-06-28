@@ -1,0 +1,25 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the AutoRouter desktop window.",
+  "windows": ["main", "switcher"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:webview:default",
+    "core:event:default",
+    "core:app:default",
+    "core:tray:default",
+    "core:menu:default",
+    "core:resources:default",
+    "core:image:default",
+    "core:path:default",
+    "shell:allow-open",
+    "opener:default",
+    "global-shortcut:default"
+  ]
+}

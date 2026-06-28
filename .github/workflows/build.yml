@@ -1,0 +1,210 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# Build installers for Windows, macOS, and Linux. The matrix uses
+# the host platform so each runner produces its own native bundle
+# (NSIS+MSI on Windows, .app+.dmg on macOS, .deb+.AppImage on
+# Linux). Builds are unsigned by default; supply the signing env
+# vars described in crates/autorouter-desktop/README.md to enable
+# code signing in a follow-up job.
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: msi,nsis
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundle: app,dmg
+          - os: macos-13
+            target: x86_64-apple-darwin
+            bundle: app,dmg
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bundle: deb,appimage
+    name: build (${{ matrix.os }} / ${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "ui/package-lock.json"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf \
+            file
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./crates/autorouter-desktop -> target"
+
+      - name: Install Tauri CLI
+        run: npm install --prefix scripts @tauri-apps/cli@^2 --no-fund --no-audit
+
+      - name: Build (unsigned)
+        run: node scripts/bundle.mjs
+        env:
+          AUTOROUTER_SKIP_SIGNING: "1"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: autorouter-${{ matrix.os }}-${{ matrix.target }}
+          path: |
+            target/release/bundle/msi/*
+            target/release/bundle/nsis/*
+            target/release/bundle/macos/*
+            target/release/bundle/dmg/*
+            target/release/bundle/deb/*
+            target/release/bundle/appimage/*
+          if-no-files-found: ignore
+
+  # B5: every CI run also exercises the workspace tests, clippy, and
+  # the bench compile-only build. A green build badge must mean a
+  # green build, not just a green bundle.
+  test:
+    name: test (${'$'}{{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${'$'}{{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf \
+            file
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  # UI E2E: spin up the headless gateway with AUTOROUTER_SERVE_UI=1
+  # and drive every button on every page through Playwright.
+  ui-e2e:
+    name: ui-e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "ui/package-lock.json"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf \
+            file
+      - name: Install JS deps (playwright)
+        run: npm install --prefix scripts playwright --no-fund --no-audit
+      - name: Install Playwright browsers
+        run: npx --prefix scripts playwright install --with-deps chromium
+      - name: Build UI
+        working-directory: ui
+        run: npm ci && npm run build
+      - name: Build gateway (release)
+        run: cargo build --release -p autorouter-app
+      - name: Run UI E2E
+        working-directory: scripts
+        run: node ui_e2e.mjs
+        env:
+          AUTOROUTER_BIN: ${{ github.workspace }}/target/release/autorouter${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+
+  # B5: bench-compile only (full benchmark runs are slow and noisy
+  # on PR builds; nightly runs them and compares against the
+  # baseline).
+  bench-compile:
+    name: bench compile (${'$'}{{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${'$'}{{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf \
+            file
+      - name: cargo bench --no-run
+        run: cargo bench -p autorouter-observability --no-run

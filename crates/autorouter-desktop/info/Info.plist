@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the macOS .app bundle. Tauri merges this with the
+  default values it generates. We set the human-readable metadata
+  the App Store / Finder / `open` use, and we describe the category
+  the app lives in.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>AutoRouter</string>
+    <key>CFBundleDisplayName</key>
+    <string>AutoRouter</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.autorouter.desktop</string>
+    <key>CFBundleExecutable</key>
+    <string>autorouter-desktop</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.15</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>(c) 2026 AutoRouter. All rights reserved.</string>
+    <key>CFBundleURLTypes</key>
+    <array/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>localhost</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
+</dict>
+</plist>
