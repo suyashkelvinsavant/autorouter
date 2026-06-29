@@ -31,3 +31,9 @@ target/release/bundle/
 # Build / runtime logs
 *.log
 ui/tmp/
+
+#Command Code
+.commandcode
+
+# AI Review Report
+*review_report.md
