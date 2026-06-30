@@ -246,6 +246,50 @@ fn inline_reasoning_tag_in_text_block_becomes_reasoning_part() {
     assert_eq!(visible, "Lead  tail");
 }
 
+/// Regression test for M11: Anthropic extended-thinking returns content
+/// blocks of `type: "thinking"` (carrying the chain-of-thought in a
+/// `thinking` field). These must surface as `ContentPart::Reasoning`
+/// rather than being silently dropped by the catch-all arm.
+#[test]
+fn thinking_content_block_becomes_reasoning_part() {
+    use autorouter_core::ContentPart;
+    let adapter = AnthropicAdapter::new();
+    let body = serde_json::json!({
+        "id": "msg_1",
+        "model": "claude-sonnet-4-5",
+        "stop_reason": "end_turn",
+        "content": [
+            { "type": "thinking", "thinking": "deliberating...", "signature": "sig" },
+            { "type": "text", "text": "answer" }
+        ]
+    });
+    let upstream = adapter
+        .decode_response(&empty_request2(), &body, 200)
+        .expect("decode");
+    let response = upstream.response;
+    let has_reasoning = response
+        .message
+        .content
+        .iter()
+        .any(|p| matches!(p, ContentPart::Reasoning { text } if text == "deliberating..."));
+    assert!(
+        has_reasoning,
+        "expected thinking block to surface as Reasoning, got {:?}",
+        response.message.content
+    );
+    let visible: String = response
+        .message
+        .content
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(visible, "answer");
+}
+
 #[test]
 fn inline_reasoning_tag_in_streaming_text_delta_becomes_reasoning_delta() {
     let adapter = AnthropicAdapter::new();

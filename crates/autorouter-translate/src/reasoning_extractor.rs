@@ -313,10 +313,6 @@ impl ReasoningStreamer {
                             self.state = StreamerState::Normal;
                         }
                         None => {
-                            // Hold back a suffix that might be the
-                            // prefix of the closing tag. We hold back
-                            // up to `close.len() - 1` bytes so any
-                            // partial-prefix of the close is preserved.
                             let hold = (close.len() - 1).min(buf.len());
                             let cut = buf.len() - hold;
                             let inside = &buf[..cut];
@@ -487,42 +483,6 @@ pub(crate) fn streamer_feed(request_ptr: usize, text: &str) -> Vec<ReasoningSpli
     streamer.feed(text)
 }
 
-/// Mark the per-request streamer as already being inside a reasoning
-/// block (without seeing the opener). Used when the upstream signals
-/// reasoning via a separate `reasoning_content` field — subsequent
-/// `content` deltas may carry the matching inline close tag and must
-/// be routed into the reasoning channel until that close is seen.
-///
-/// `open_tag` is the inline opener (e.g. `"<think>"`) whose
-/// corresponding close tag (derived by [`close_tag_for`]) will be
-/// matched against incoming content to exit the reasoning state.
-/// Returns any splits that were flushed from a non-empty carry buffer
-/// before the reasoning transition, so the caller can emit them as
-/// TextDelta events. When the carry is empty (the common case), the
-/// returned Vec is empty and the caller can proceed with reasoning.
-pub(crate) fn streamer_open_reasoning(
-    request_ptr: usize,
-    open_tag: &'static str,
-) -> Vec<ReasoningSplit> {
-    let mut map = streamers().lock().unwrap_or_else(|e| e.into_inner());
-    let streamer = map.entry(request_ptr).or_default();
-    if streamer.state == StreamerState::Normal && streamer.carry.is_empty() {
-        streamer.state = StreamerState::InReasoning { open: open_tag };
-        vec![]
-    } else if !streamer.carry.is_empty() {
-        // The carry buffer held content from a previous chunk that was
-        // not yet flushed. Drain it as Text first (the content was not
-        // classified as reasoning), then transition to InReasoning so
-        // subsequent content deltas are routed correctly.
-        let flushed = vec![ReasoningSplit::Text(streamer.carry.clone())];
-        streamer.carry.clear();
-        streamer.state = StreamerState::InReasoning { open: open_tag };
-        flushed
-    } else {
-        vec![]
-    }
-}
-
 /// Drain the per-request streamer's pending state. Returns the
 /// splits to emit at end-of-stream (handles the unclosed-tag
 /// case where the carry should be classified as reasoning).
@@ -623,52 +583,6 @@ mod tests {
         all.extend(s.feed(&suf));
         all.extend(s.flush());
         assert_eq!(all, vec![r("deep"), text("tail")]);
-    }
-
-    #[test]
-    fn streamer_open_reasoning_marks_state() {
-        // After streamer_open_reasoning, the next feed() should treat its
-        // input as inside a reasoning block until the inline close tag.
-        // (The streamer holds back close_tag.len()-1 chars in InReasoning
-        // mode, so a single feed() won't emit the whole input — it takes
-        // multiple feeds to flush.)
-        let flushed = streamer_open_reasoning(0xDEAD_BEEF, "<think>");
-        assert!(flushed.is_empty(), "no carry to flush on fresh streamer");
-        // Feed a long chunk that cannot contain the close tag anywhere
-        // except possibly at the tail. The streamer should emit everything
-        // except the last 7 chars as reasoning.
-        let out = streamer_feed(0xDEAD_BEEF, "thoughts and more reasoning text here");
-        let joined: String = out
-            .iter()
-            .filter_map(|s| match s {
-                ReasoningSplit::Reasoning(t) => Some(t.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-        // Must not contain the trailing carry (which is held back).
-        assert!(joined.contains("thoughts and more"));
-        assert!(
-            !joined.contains("here"),
-            "carry should be withheld: {:?}",
-            out
-        );
-        // Now feed the close tag plus trailing answer.
-        let out = streamer_feed(0xDEAD_BEEF, "</think>PONG");
-        // Should emit any held-back carry as reasoning, then `PONG` as text.
-        assert!(
-            out.iter()
-                .any(|s| matches!(s, ReasoningSplit::Reasoning(_))),
-            "got {:?}",
-            out
-        );
-        assert!(
-            out.iter()
-                .any(|s| matches!(s, ReasoningSplit::Text(t) if t == "PONG")),
-            "got {:?}",
-            out
-        );
-        streamer_finish(0xDEAD_BEEF);
     }
 
     #[test]

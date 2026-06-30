@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use autorouter_core::{
@@ -14,7 +14,7 @@ use autorouter_core::{
 
 use crate::error::{TranslateError, TranslateResult};
 use crate::reasoning_extractor::{
-    split_reasoning, streamer_feed, streamer_finish, streamer_open_reasoning, ReasoningSplit,
+    split_reasoning, streamer_feed, streamer_finish, ReasoningSplit,
 };
 use crate::traits::{ProviderAdapter, UpstreamResponse};
 
@@ -140,15 +140,22 @@ impl ProviderAdapter for OpenAiChatAdapter {
                 // Drain any pending reasoning and clean up tool-call
                 // state. If the upstream did not send a finish_reason
                 // chunk (some non-compliant providers), emit a fallback
-                // Finish so the stream terminates cleanly.
+                // Finish so the stream terminates cleanly. Track
+                // finish-emitted to avoid a spurious second Finish when
+                // the upstream already sent a finish_reason chunk.
                 for split in streamer_finish(request_ptr) {
                     push_split(&mut out, split);
                 }
+                flush_tool_call_ends(request_ptr, &mut out);
                 openai_tool_call_drop(request_ptr);
-                out.push(StreamChunk::from(StreamEvent::Finish {
-                    reason: FinishReason::Stop,
-                    usage: None,
-                }));
+                if !finish_already_emitted(request_ptr) {
+                    mark_finish_emitted(request_ptr);
+                    out.push(StreamChunk::from(StreamEvent::Finish {
+                        reason: FinishReason::Stop,
+                        usage: None,
+                    }));
+                }
+                openai_finish_emitted_drop(request_ptr);
                 continue;
             }
             let value: Value = match serde_json::from_str(payload) {
@@ -176,6 +183,7 @@ impl ProviderAdapter for OpenAiChatAdapter {
                     push_split(&mut out, split);
                 }
                 openai_tool_call_drop(request_ptr);
+                openai_finish_emitted_drop(request_ptr);
                 out.push(StreamChunk::from(StreamEvent::Error { message, code }));
                 continue;
             }
@@ -204,14 +212,15 @@ impl ProviderAdapter for OpenAiChatAdapter {
                     {
                         if !reasoning.is_empty() {
                             // The upstream signalled reasoning via a dedicated
-                            // `reasoning_content` field. Mark the streamer as
-                            // already inside a reasoning block so subsequent
-                            // `content` deltas (which may carry an inline
-                            // close tag) are routed correctly. If the carry
-                            // buffer had content, flush it as Text first.
-                            for split in streamer_open_reasoning(request_ptr, "<think>") {
-                                push_split(&mut out, split);
-                            }
+                            // `reasoning_content` field — emit it verbatim as a
+                            // ReasoningDelta. We deliberately do NOT prime the
+                            // inline-tag streamer here: models that use a
+                            // separate `reasoning_content` field (e.g. DeepSeek
+                            // R1) send their answer in `content` without any
+                            // inline tags, and entering the reasoning state would
+                            // misclassify that answer as reasoning. Inline tags
+                            // embedded directly in `content` are still handled by
+                            // the streamer's Normal-state opener detection.
                             out.push(StreamChunk::from(StreamEvent::ReasoningDelta {
                                 text: reasoning.to_string(),
                             }));
@@ -229,11 +238,11 @@ impl ProviderAdapter for OpenAiChatAdapter {
                         for split in streamer_finish(request_ptr) {
                             push_split(&mut out, split);
                         }
-                        // Drop the per-request tool-call id map so it
-                        // does not leak across streams when the
-                        // upstream terminates with a finish_reason
-                        // chunk but no trailing [DONE] sentinel.
+                        // Flush in-progress tool calls so consumers
+                        // always see ToolCallEnd after the last delta.
+                        flush_tool_call_ends(request_ptr, &mut out);
                         openai_tool_call_drop(request_ptr);
+                        mark_finish_emitted(request_ptr);
                         let usage = value.get("usage").and_then(decode_usage);
                         out.push(StreamChunk::from(StreamEvent::Finish {
                             reason: self.map_finish_reason(finish),
@@ -292,8 +301,7 @@ fn encode_message(message: &Message) -> TranslateResult<Value> {
     } else {
         let mut parts: Vec<Value> = Vec::new();
         let mut tool_calls: Vec<Value> = Vec::new();
-        let mut tool_call_id: Option<String> = None;
-        let mut tool_content: Option<String> = None;
+        let mut tool_results: Vec<(String, String)> = Vec::new();
         for part in &message.content {
             match part {
                 ContentPart::Text { text } => {
@@ -359,7 +367,6 @@ fn encode_message(message: &Message) -> TranslateResult<Value> {
                     content,
                     is_error,
                 } => {
-                    tool_call_id = Some(id.clone());
                     let text = match content {
                         autorouter_core::ToolResultPayload::Text { text } => text.clone(),
                         autorouter_core::ToolResultPayload::Json { value } => {
@@ -367,9 +374,9 @@ fn encode_message(message: &Message) -> TranslateResult<Value> {
                         }
                     };
                     if *is_error {
-                        tool_content = Some(format!("[tool error] {}", text));
+                        tool_results.push((id.clone(), format!("[tool error] {}", text)));
                     } else {
-                        tool_content = Some(text);
+                        tool_results.push((id.clone(), text));
                     }
                 }
                 ContentPart::Document { source, filename } => {
@@ -412,20 +419,38 @@ fn encode_message(message: &Message) -> TranslateResult<Value> {
                 }
             }
         }
-        if let Some(tc) = tool_content {
-            // Tool-role messages must use string content (not array).
-            // Append any text parts as a prefix so nothing is lost.
+        if !tool_results.is_empty() {
+            // OpenAI's tool-role message accepts a single `tool_call_id`
+            // and a single content string. The common case is exactly
+            // one tool result — emit it verbatim so the upstream model
+            // sees the clean tool output. The degenerate multi-result
+            // case (more than one ToolResult in one message) cannot be
+            // represented faithfully; we disambiguate with an `[id]`
+            // prefix per result rather than silently dropping all but
+            // the last.
+            let combined_content = if tool_results.len() == 1 {
+                tool_results[0].1.clone()
+            } else {
+                tool_results
+                    .iter()
+                    .map(|(id, content)| format!("[{}] {}", id, content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             let text_prefix: String = parts
                 .iter()
                 .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
                 .collect::<Vec<_>>()
                 .join("\n");
             let combined = if text_prefix.is_empty() {
-                tc
+                combined_content
             } else {
-                format!("{}\n{}", text_prefix, tc)
+                format!("{}\n{}", text_prefix, combined_content)
             };
             obj.insert("content".into(), Value::String(combined));
+            if let Some((first_id, _)) = tool_results.first() {
+                obj.insert("tool_call_id".into(), Value::String(first_id.clone()));
+            }
         } else if !parts.is_empty() {
             obj.insert("content".into(), Value::Array(parts));
         } else {
@@ -433,9 +458,6 @@ fn encode_message(message: &Message) -> TranslateResult<Value> {
         }
         if !tool_calls.is_empty() {
             obj.insert("tool_calls".into(), Value::Array(tool_calls));
-        }
-        if let Some(id) = tool_call_id {
-            obj.insert("tool_call_id".into(), Value::String(id));
         }
     }
     Ok(Value::Object(obj))
@@ -458,8 +480,44 @@ fn encode_tool(tool: &ToolDefinition) -> Value {
 /// with the original `ToolCallStart` event.
 static TOOL_CALL_IDS: OnceLock<Mutex<HashMap<usize, HashMap<u64, String>>>> = OnceLock::new();
 
+/// Per-stream finish-emitted flag. Prevents a spurious second
+/// Finish event from the `[DONE]` sentinel when the upstream already
+/// emitted a finish_reason chunk.
+static FINISH_EMITTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+
 fn tool_call_ids() -> &'static Mutex<HashMap<usize, HashMap<u64, String>>> {
     TOOL_CALL_IDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn finish_emitted() -> &'static Mutex<HashSet<usize>> {
+    FINISH_EMITTED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_finish_emitted(request_ptr: usize) {
+    finish_emitted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(request_ptr);
+}
+
+fn finish_already_emitted(request_ptr: usize) -> bool {
+    finish_emitted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&request_ptr)
+}
+
+/// Remove the per-stream finish flag so the map doesn't accumulate
+/// entries across streams. Called alongside `openai_tool_call_drop`.
+/// Also called from `autorouter_server::upstream` when the byte stream
+/// ends without a `[DONE]` sentinel (e.g. an upstream that closes the
+/// connection right after `finish_reason`), so the flag cannot leak
+/// and pin a stream_id that a future stream reuses.
+pub fn openai_finish_emitted_drop(request_ptr: usize) {
+    finish_emitted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&request_ptr);
 }
 
 /// Clean up the per-request tool-call id map. Called when the stream
@@ -482,48 +540,75 @@ fn handle_openai_tool_call_delta(tc: &Value, request_ptr: usize, out: &mut Vec<S
         .and_then(|v| v.as_str())
         .map(String::from);
     let index = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-    match (id, name, args) {
-        (Some(id), Some(name), Some(args)) => {
-            // First delta for this tool call — store the index→id
-            // mapping so subsequent deltas (which lack `id`) can
-            // be correlated.
+
+    // Is this the first delta for this tool-call index? We key a "start"
+    // on the presence of an unseen id rather than on the function name:
+    // some non-compliant upstreams (Azure, certain proxies) emit the
+    // first delta with an id + arguments but no name. Treating that as a
+    // "subsequent" delta would emit a ToolCallDelta with no preceding
+    // ToolCallStart, so the consumer can never assemble the call.
+    let already_started = {
+        let map = tool_call_ids().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&request_ptr)
+            .map(|m| m.contains_key(&index))
+            .unwrap_or(false)
+    };
+
+    if !already_started {
+        if let Some(id) = id {
             {
                 let mut map = tool_call_ids().lock().unwrap_or_else(|e| e.into_inner());
                 map.entry(request_ptr)
                     .or_default()
                     .insert(index, id.clone());
             }
-            // Some upstreams send partial JSON as arguments in the
-            // first delta (e.g. `{"city":`). Attempt to parse it as
-            // JSON; fall back to preserving the raw string so the
-            // downstream consumer can assemble fragments rather than
-            // silently dropping the data.
-            let arguments: Value =
-                serde_json::from_str(&args).unwrap_or(Value::String(args.clone()));
-            out.push(StreamChunk::from(StreamEvent::ToolCallStart {
-                call: ToolCall {
-                    id: id.clone(),
-                    name,
-                    arguments,
-                },
-            }));
-            out.push(StreamChunk::from(StreamEvent::ToolCallEnd { id }));
-        }
-        (_, _, Some(args)) => {
-            // Subsequent delta — look up the id by index.
-            let id = {
-                let map = tool_call_ids().lock().unwrap_or_else(|e| e.into_inner());
-                map.get(&request_ptr)
-                    .and_then(|m| m.get(&index))
-                    .cloned()
-                    .unwrap_or_else(|| format!("call_{index}"))
+            // Fall back to an empty name if the upstream omitted it on the
+            // opening delta; the consumer still gets a well-formed Start it
+            // can correlate subsequent deltas against.
+            let name = name.unwrap_or_default();
+            let arguments: Value = match &args {
+                Some(a) => serde_json::from_str(a).unwrap_or(Value::String(a.clone())),
+                None => Value::Null,
             };
-            out.push(StreamChunk::from(StreamEvent::ToolCallDelta {
-                id,
-                arguments_fragment: args,
+            out.push(StreamChunk::from(StreamEvent::ToolCallStart {
+                call: ToolCall { id, name, arguments },
             }));
+            // ToolCallEnd is deferred until finish_reason arrives or the
+            // stream terminates — emitting it here would signal completion
+            // before subsequent argument deltas arrive.
+            return;
         }
-        _ => {}
+    }
+
+    if let Some(args) = args {
+        // Subsequent delta — look up the id by index.
+        let id = {
+            let map = tool_call_ids().lock().unwrap_or_else(|e| e.into_inner());
+            map.get(&request_ptr)
+                .and_then(|m| m.get(&index))
+                .cloned()
+                .unwrap_or_else(|| format!("call_{index}"))
+        };
+        out.push(StreamChunk::from(StreamEvent::ToolCallDelta {
+            id,
+            arguments_fragment: args,
+        }));
+    }
+}
+
+/// Emit `ToolCallEnd` for every in-progress tool call on the given
+/// stream. Called when finish_reason arrives or when the stream ends.
+fn flush_tool_call_ends(request_ptr: usize, out: &mut Vec<StreamChunk>) {
+    let ids: Vec<String> = {
+        let map = tool_call_ids().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&request_ptr)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
+    };
+    for id in &ids {
+        out.push(StreamChunk::from(StreamEvent::ToolCallEnd {
+            id: id.clone(),
+        }));
     }
 }
 

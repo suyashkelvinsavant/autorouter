@@ -124,19 +124,19 @@ impl GatewaySupervisor {
     /// doesn't drop the response on a request that was already
     /// mid-flight.
     pub async fn stop_graceful(&self) {
-        // Same Send-guard dance as `sync_router_state`: pull the
-        // slot out of the mutex and drop the guard before awaiting
-        // on its join handle. `parking_lot::MutexGuard` is `!Send`.
         let slot = match self.inner.lock().take() {
             Some(s) => s,
             None => return,
         };
         slot.signal_shutdown();
-        if tokio::time::timeout(std::time::Duration::from_millis(1000), slot.join)
-            .await
-            .is_err()
-        {
-            tracing::warn!("supervisor: gateway task did not drain within 1s of stop_graceful");
+        let mut handle = slot.join;
+        tokio::select! {
+            _ = &mut handle => {}
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1000)) => {
+                tracing::warn!("supervisor: gateway task did not drain within 1s of stop_graceful; aborting");
+                handle.abort();
+                let _ = handle.await;
+            }
         }
     }
 

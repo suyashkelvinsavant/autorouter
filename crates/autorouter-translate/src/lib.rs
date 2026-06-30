@@ -15,8 +15,10 @@ pub mod reasoning_extractor;
 pub mod streaming;
 pub mod traits;
 
+pub use anthropic::anthropic_finish_drop;
 pub use anthropic::anthropic_tool_call_drop;
 pub use gemini::gemini_cleanup_drop;
+pub use openai_chat::openai_finish_emitted_drop;
 pub use openai_chat::openai_tool_call_drop;
 pub use reasoning_extractor::{split_reasoning, streamer_drop, ReasoningSplit, ReasoningStreamer};
 

@@ -267,8 +267,14 @@ impl Storage {
                 .conn
                 .lock()
                 .map_err(|e| ConfigError::Storage(e.to_string()))?;
-            let escaped = backup.display().to_string().replace('\'', "''");
-            conn.execute_batch(&format!("VACUUM INTO '{escaped}'"))
+            // Use rusqlite's backup API instead of VACUUM INTO with
+            // hand-escaped paths to avoid SQL injection.
+            let mut dst = Connection::open(backup)
+                .map_err(|e| ConfigError::Storage(format!("backup open error: {e}")))?;
+            let backup_handle = rusqlite::backup::Backup::new(&conn, &mut dst)
+                .map_err(|e| ConfigError::Storage(format!("backup init error: {e}")))?;
+            backup_handle
+                .run_to_completion(100, std::time::Duration::from_millis(250), None)
                 .map_err(|e| ConfigError::Storage(format!("backup failed: {e}")))?;
         }
         Ok(())
@@ -322,37 +328,54 @@ fn apply_migration(conn: &Connection, version: u32) -> ConfigResult<()> {
         3 => {
             // L9: add request/session correlation columns to provider_events.
             // SQLite ALTER TABLE is additive and does not rewrite the table.
+            // Each column is added individually: a crash mid-migration that
+            // left some columns in place must not prevent the remaining ones
+            // from being added. `add_column_if_missing` introspects
+            // `PRAGMA table_info` and skips columns that already exist, so a
+            // partially-applied migration converges instead of stalling.
+            add_column_if_missing(conn, "provider_events", "request_id", "TEXT")?;
+            add_column_if_missing(conn, "provider_events", "session_id", "TEXT")?;
+            add_column_if_missing(conn, "provider_events", "source_provider", "TEXT")?;
             conn.execute_batch(
-                r#"
-                ALTER TABLE provider_events ADD COLUMN request_id TEXT;
-                ALTER TABLE provider_events ADD COLUMN session_id TEXT;
-                ALTER TABLE provider_events ADD COLUMN source_provider TEXT;
-                CREATE INDEX IF NOT EXISTS idx_provider_events_request
-                    ON provider_events(request_id);
-                "#,
+                "CREATE INDEX IF NOT EXISTS idx_provider_events_request
+                    ON provider_events(request_id);",
             )?;
             Ok(())
         }
         4 => {
-            // Analytics pipeline: add per-event token + reasoning
-            // columns to `provider_events` so the dashboard can
-            // surface real usage without joining against another
-            // table. All columns default to 0 for pre-existing rows
-            // (the read path collapses NULL → 0 for the same
-            // reason). `reasoning_tokens` is recorded separately
-            // because most providers do not bill it, but a few do
-            // (Anthropic extended thinking) and the Analytics page
-            // surfaces it as its own bucket.
+            add_column_if_missing(
+                conn,
+                "provider_events",
+                "input_tokens",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                conn,
+                "provider_events",
+                "output_tokens",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                conn,
+                "provider_events",
+                "cache_read_tokens",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                conn,
+                "provider_events",
+                "cache_write_tokens",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            add_column_if_missing(
+                conn,
+                "provider_events",
+                "reasoning_tokens",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
             conn.execute_batch(
-                r#"
-                ALTER TABLE provider_events ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE provider_events ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE provider_events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE provider_events ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE provider_events ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;
-                CREATE INDEX IF NOT EXISTS idx_provider_events_created
-                    ON provider_events(created_at DESC);
-                "#,
+                "CREATE INDEX IF NOT EXISTS idx_provider_events_created
+                    ON provider_events(created_at DESC);",
             )?;
             Ok(())
         }
@@ -360,6 +383,52 @@ fn apply_migration(conn: &Connection, version: u32) -> ConfigResult<()> {
             "no migration registered for schema version {other}"
         ))),
     }
+}
+
+/// Add a column to a table only if it is not already present.
+///
+/// This introspects `PRAGMA table_info(<table>)` so a partially-applied
+/// migration (e.g. some columns added before a crash) converges instead of
+/// failing with "duplicate column name". This is safer than running a batch
+/// of `ALTER TABLE ADD COLUMN` statements: a batch aborts on the first
+/// duplicate and leaves the remaining columns missing while the migration
+/// is reported as successful.
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    decl: &str,
+) -> ConfigResult<()> {
+    // Validate identifiers FIRST — before any SQL is constructed or executed —
+    // so injection-unsafe input is rejected even on the PRAGMA path.
+    // The `decl` parameter intentionally skips this check because it is a type
+    // declaration that may contain spaces and keywords (e.g.
+    // "INTEGER NOT NULL DEFAULT 0"); all call sites pass string literals.
+    fn safe_ident(s: &str) -> bool {
+        s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+    if !safe_ident(table) || !safe_ident(column) {
+        return Err(ConfigError::Storage(format!(
+            "unsafe identifier in add_column_if_missing: {table}.{column}"
+        )));
+    }
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let rows = stmt.query_map([], |row| {
+        let name: String = row.get(1)?;
+        Ok(name)
+    })?;
+    for res in rows {
+        let existing = res?;
+        if existing.eq_ignore_ascii_case(column) {
+            return Ok(());
+        }
+    }
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {decl}");
+    conn.execute(&sql, [])
+        .map_err(|e| ConfigError::Storage(e.to_string()))?;
+    Ok(())
 }
 
 /// Unix epoch seconds. A typed timestamp prevents unit-mix bugs

@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use autorouter_core::{
@@ -15,6 +15,38 @@ use autorouter_core::{
 use crate::error::{TranslateError, TranslateResult};
 use crate::openai_chat::push_split;
 use crate::reasoning_extractor::{split_reasoning, streamer_feed, streamer_finish, ReasoningSplit};
+
+/// Per-stream finish-emitted tracker. Prevents a spurious second
+/// Finish event when `message_stop` arrives after `message_delta`.
+static ANTHROPIC_FINISH_EMITTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+
+fn anthropic_finish_emitted() -> &'static Mutex<HashSet<usize>> {
+    ANTHROPIC_FINISH_EMITTED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_anthropic_finish(request_ptr: usize) {
+    anthropic_finish_emitted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(request_ptr);
+}
+
+fn anthropic_finish_already(request_ptr: usize) -> bool {
+    anthropic_finish_emitted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&request_ptr)
+}
+
+/// Remove the per-stream finish flag. Called from the `message_stop`
+/// and `error` arms, and also from `autorouter_server::upstream` when
+/// the byte stream ends so the flag cannot outlive the stream.
+pub fn anthropic_finish_drop(request_ptr: usize) {
+    anthropic_finish_emitted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&request_ptr);
+}
 
 /// Per-stream content-block index → tool-call id map for Anthropic.
 static ANTHROPIC_TOOL_IDS: OnceLock<Mutex<HashMap<usize, HashMap<i64, String>>>> = OnceLock::new();
@@ -402,6 +434,7 @@ impl ProviderAdapter for AnthropicAdapter {
                         push_split(&mut out, split);
                     }
                     anthropic_tool_call_drop(request_ptr);
+                    mark_anthropic_finish(request_ptr);
                     if let Some(stop_reason) = value
                         .get("delta")
                         .and_then(|d| d.get("stop_reason"))
@@ -415,18 +448,20 @@ impl ProviderAdapter for AnthropicAdapter {
                     }
                 }
                 "message_stop" => {
-                    // Defensive drain: in the common case `message_delta`
-                    // already drained reasoning and dropped the tool-call
-                    // map, so both `streamer_finish` and
-                    // `anthropic_tool_call_drop` are no-ops here.
-                    // However, some proxies send `message_stop` directly
-                    // (no `message_delta`); without this drain they would
-                    // leak a ReasoningStreamer (up to 64 KiB carry) until
-                    // process restart.
                     for split in streamer_finish(request_ptr) {
                         push_split(&mut out, split);
                     }
                     anthropic_tool_call_drop(request_ptr);
+                    // Some proxies send message_stop without a preceding
+                    // message_delta. Emit a fallback Finish so the
+                    // consumer gets a terminal event.
+                    if !anthropic_finish_already(request_ptr) {
+                        out.push(StreamChunk::from(StreamEvent::Finish {
+                            reason: FinishReason::Stop,
+                            usage: None,
+                        }));
+                    }
+                    anthropic_finish_drop(request_ptr);
                 }
                 "error" => {
                     // Drain pending reasoning and drop the tool-call
@@ -440,6 +475,7 @@ impl ProviderAdapter for AnthropicAdapter {
                         push_split(&mut out, split);
                     }
                     anthropic_tool_call_drop(request_ptr);
+                    anthropic_finish_drop(request_ptr);
                     let message = value
                         .get("error")
                         .and_then(|e| e.get("message"))
@@ -653,6 +689,16 @@ fn encode_assistant_content(message: &Message) -> Value {
                 "name": name,
                 "input": arguments_raw,
             })),
+            ContentPart::ToolUse {
+                id,
+                name,
+                input,
+            } => blocks.push(json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input,
+            })),
             _ => {}
         }
         i += 1;
@@ -706,6 +752,19 @@ fn decode_anthropic_response(body: &Value) -> TranslateResult<UniversalResponse>
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                Some("thinking") => {
+                    // Anthropic extended-thinking blocks carry the
+                    // chain-of-thought in a `thinking` field. Surface
+                    // them as Reasoning so they are not silently
+                    // dropped by the `_ => {}` catch-all.
+                    if let Some(text) = block.get("thinking").and_then(|v| v.as_str()) {
+                        if !text.is_empty() {
+                            content.push(ContentPart::Reasoning {
+                                text: text.to_string(),
+                            });
                         }
                     }
                 }

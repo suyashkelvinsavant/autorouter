@@ -103,7 +103,52 @@ fn encodes_tool_call_request() {
     assert_eq!(body["tools"][0]["function"]["name"], "search");
     assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_1");
     assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
+    // Single tool result must be emitted verbatim (no `[id]` prefix).
     assert_eq!(body["messages"][2]["content"], "ok");
+}
+
+/// Regression test for M9: a message with multiple `ToolResult` parts
+/// (a degenerate case the OpenAI wire format cannot represent cleanly —
+/// only one `tool_call_id` is allowed per tool message) must not drop
+/// all but the last result. The encoder disambiguates with an `[id]`
+/// prefix per result instead of silently overwriting.
+#[test]
+fn encodes_multiple_tool_results_without_dropping() {
+    let adapter = OpenAiChatAdapter::new();
+    let request = UniversalRequest {
+        model: "gpt-5".into(),
+        messages: vec![
+            text_message(MessageRole::User, "run two tools"),
+            Message {
+                role: MessageRole::Tool,
+                content: vec![
+                    ContentPart::ToolResult {
+                        tool_call_id: "call_1".into(),
+                        content: autorouter_core::ToolResultPayload::Text {
+                            text: "first".into(),
+                        },
+                        is_error: false,
+                    },
+                    ContentPart::ToolResult {
+                        tool_call_id: "call_2".into(),
+                        content: autorouter_core::ToolResultPayload::Text {
+                            text: "second".into(),
+                        },
+                        is_error: false,
+                    },
+                ],
+                name: None,
+            },
+        ],
+        tools: Vec::new(),
+        ..empty_request()
+    };
+    let body = adapter.encode_request(&request).unwrap();
+    let content = body["messages"][1]["content"].as_str().unwrap();
+    // Both results survive (previously only "second" survived).
+    assert!(content.contains("first"), "lost first result: {content}");
+    assert!(content.contains("second"), "lost second result: {content}");
+    assert!(content.contains("[call_1]"), "missing id prefix: {content}");
 }
 
 #[test]
@@ -140,6 +185,49 @@ fn decodes_tool_call_response() {
     assert_eq!(id, "call_1");
     assert_eq!(name, "search");
     assert_eq!(arguments, &serde_json::json!({ "q": "rust" }));
+}
+
+/// Regression test for M7: some non-compliant upstreams emit the first
+/// tool-call delta with an `id` + `arguments` but NO `function.name`.
+/// The decoder must still emit a `ToolCallStart` (with an empty name)
+/// so subsequent argument deltas have a Start to correlate against —
+/// previously this fell into the "subsequent delta" branch and emitted
+/// a `ToolCallDelta` with no preceding Start.
+#[test]
+fn streaming_tool_call_first_delta_without_name_still_starts() {
+    use autorouter_translate::ProviderAdapter;
+    let adapter = OpenAiChatAdapter::new();
+    let request = empty_request2();
+    // First delta: id + arguments present, name absent.
+    let first =
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_7","function":{"arguments":"{\"q\":"}}]}}]}"#;
+    let events: Vec<StreamEvent> = adapter
+        .decode_stream_chunk(&request, first)
+        .unwrap()
+        .into_iter()
+        .flat_map(|c| c.events)
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolCallStart { call } if call.id == "call_7")),
+        "expected ToolCallStart for id-less first delta, got {events:?}"
+    );
+    // Subsequent argument delta must correlate to the same id.
+    let second =
+        r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"rust\"}"}}]}}]}"#;
+    let events2: Vec<StreamEvent> = adapter
+        .decode_stream_chunk(&request, second)
+        .unwrap()
+        .into_iter()
+        .flat_map(|c| c.events)
+        .collect();
+    assert!(
+        events2
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolCallDelta { id, .. } if id == "call_7")),
+        "subsequent delta must carry the started id, got {events2:?}"
+    );
 }
 
 #[test]
@@ -219,6 +307,55 @@ fn decode_openai_chat_streaming_extracts_reasoning_content() {
         StreamEvent::ReasoningDelta { text } => assert_eq!(text, "let me think..."),
         other => panic!("expected ReasoningDelta, got {other:?}"),
     }
+}
+
+/// Regression test for C5: when a model signals reasoning via the
+/// separate `reasoning_content` field (e.g. DeepSeek R1), the answer
+/// that arrives afterwards in `content` (with NO inline tags) must be
+/// emitted as `TextDelta`, not misclassified as reasoning. Previously
+/// the adapter primed the inline-tag streamer on `reasoning_content`,
+/// trapping all subsequent content in reasoning mode.
+#[test]
+fn reasoning_content_then_plain_content_is_not_misclassified() {
+    use autorouter_translate::ProviderAdapter;
+    let adapter = OpenAiChatAdapter::new();
+    let request = empty_request2();
+
+    // Chunk 1: reasoning arrives via the dedicated field.
+    let chunk1 = r#"data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}"#;
+    let events1: Vec<StreamEvent> = adapter
+        .decode_stream_chunk(&request, chunk1)
+        .unwrap()
+        .into_iter()
+        .flat_map(|c| c.events)
+        .collect();
+    assert_eq!(events1.len(), 1);
+    assert!(matches!(
+        events1[0],
+        StreamEvent::ReasoningDelta { ref text } if text == "thinking..."
+    ));
+
+    // Chunk 2: the plain answer arrives in `content` with no tags.
+    let chunk2 = r#"data: {"choices":[{"delta":{"content":"the answer"}}]}"#;
+    let events2: Vec<StreamEvent> = adapter
+        .decode_stream_chunk(&request, chunk2)
+        .unwrap()
+        .into_iter()
+        .flat_map(|c| c.events)
+        .collect();
+    // Must surface as TextDelta, NOT ReasoningDelta.
+    assert!(
+        events2
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { text } if text.contains("the answer"))),
+        "plain content after reasoning_content must be TextDelta, got {events2:?}"
+    );
+    assert!(
+        !events2
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ReasoningDelta { .. })),
+        "plain content must not be misclassified as reasoning, got {events2:?}"
+    );
 }
 
 #[test]

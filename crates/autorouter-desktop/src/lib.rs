@@ -1,6 +1,7 @@
 #![deny(unused_crate_dependencies)]
 //! Tauri 2 shell hosting the AutoRouter gateway and the dashboard UI.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
@@ -111,6 +112,13 @@ fn reveal_data_dir(app: AppHandle) -> Result<String, String> {
 /// handler can run the shutdown backup before the process exits.
 static SHUTDOWN_HANDLES: OnceLock<ShutdownHandles> = OnceLock::new();
 
+/// Ensures the shutdown backup runs at most once per process. The
+/// tray "quit" handler and the `quit_app` command both perform the
+/// backup and then call `app.exit(0)`, which re-fires
+/// `RunEvent::ExitRequested`. Without this guard the (potentially
+/// slow) SQLite backup runs twice and doubles shutdown latency.
+static SHUTDOWN_BACKUP_DONE: AtomicBool = AtomicBool::new(false);
+
 struct ShutdownHandles {
     storage: Option<Arc<autorouter_server::StorageHandle>>,
     backup_dir: std::path::PathBuf,
@@ -119,6 +127,9 @@ struct ShutdownHandles {
 
 fn perform_shutdown_backup(handles: &ShutdownHandles) {
     if !handles.backup_on_shutdown {
+        return;
+    }
+    if SHUTDOWN_BACKUP_DONE.swap(true, Ordering::SeqCst) {
         return;
     }
     if let Some(storage) = handles.storage.as_ref() {
@@ -140,10 +151,14 @@ fn quit_app(app: AppHandle) {
     if let Some(handles) = SHUTDOWN_HANDLES.get() {
         perform_shutdown_backup(handles);
     }
-    // Gracefully shut down the gateway so in-flight requests drain
-    // before the process exits. Without this, clients see a TCP reset
-    // on any request still mid-flight.
+    // Stop the LogBridge drain task and gracefully stop the gateway
+    // before the process exits. Without stopping the bridge here, any
+    // log entries still in the sink at quit time are lost (M18).
+    // Without stopping the gateway, in-flight clients see a TCP reset.
     if let Some(state) = app.try_state::<DesktopState>() {
+        if let Some(ref bridge) = state.log_bridge {
+            bridge.stop();
+        }
         tauri::async_runtime::block_on(state.supervisor.stop_graceful());
     }
     app.exit(0);
@@ -1845,9 +1860,21 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             if let RunEvent::ExitRequested { .. } = event {
-                // Allow exit when explicitly requested.
+                tracing::info!("ExitRequested — performing shutdown backup and stopping gateway");
+                if let Some(handles) = SHUTDOWN_HANDLES.get() {
+                    perform_shutdown_backup(handles);
+                }
+                if let Some(state) = app.try_state::<DesktopState>() {
+                    let supervisor = state.supervisor.clone();
+                    if let Some(ref bridge) = state.log_bridge {
+                        bridge.stop();
+                    }
+                    tauri::async_runtime::block_on(async move {
+                        supervisor.stop_graceful().await;
+                    });
+                }
             }
         });
 }

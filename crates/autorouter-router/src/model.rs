@@ -113,7 +113,22 @@ pub struct ModelCapability {
 
 impl ModelCapability {
     /// Score for capability routing. Higher is better.
+    /// Returns `-1` (disqualification) when the model lacks a
+    /// must-satisfy capability — a model that can't handle vision
+    /// must never outscore one that can through additive points.
     pub fn capability_score(&self, needs: &CapabilityNeeds) -> i32 {
+        if needs.vision && !self.supports_vision {
+            return -1;
+        }
+        if needs.audio && !self.supports_audio {
+            return -1;
+        }
+        if needs.tools && !self.supports_tools {
+            return -1;
+        }
+        if needs.min_context > 0 && (self.context_window as u32) < needs.min_context {
+            return -1;
+        }
         let mut score = 0;
         if needs.vision && self.supports_vision {
             score += 5;
@@ -227,23 +242,38 @@ impl CapabilityRegistry {
     }
 
     /// Best matches for the given capability needs. `prefer_free` is
-    /// a tie-breaker.
+    /// a tie-breaker. Disqualified entries (score `-1`) are excluded.
+    /// Uses stable sort for deterministic tie-breaking.
     pub fn best_match(
         &self,
         needs: &CapabilityNeeds,
         prefer_free: bool,
     ) -> Option<&ModelCapability> {
-        self.entries.iter().max_by_key(|entry| {
-            let mut score = entry.capability_score(needs);
-            if prefer_free && entry.is_free {
-                score += 1;
-            }
-            if !entry.supports_streaming {
-                // Streaming-capable models win over non-streaming ones.
-                score -= 1;
-            }
-            score
-        })
+        let mut scored: Vec<(&ModelCapability, i32)> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let mut score = entry.capability_score(needs);
+                if score < 0 {
+                    return (entry, -1);
+                }
+                if prefer_free && entry.is_free {
+                    score += 1;
+                }
+                if !entry.supports_streaming {
+                    score -= 1;
+                }
+                (entry, score)
+            })
+            .filter(|(_, s)| *s >= 0)
+            .collect();
+        // Sort by score descending, then by model name for
+        // deterministic tie-breaking (order within same score is
+        // now the same across restarts).
+        scored.sort_by(|(a, sa), (b, sb)| {
+            sb.cmp(sa).then_with(|| a.model.cmp(&b.model))
+        });
+        scored.first().map(|(entry, _)| *entry)
     }
 }
 

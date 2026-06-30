@@ -88,12 +88,12 @@ impl ProviderAdapter for GeminiAdapter {
     }
 
     fn encode_request(&self, request: &UniversalRequest) -> TranslateResult<Value> {
-        let mut system_instruction: Option<Value> = None;
+        let mut system_parts: Vec<Value> = Vec::new();
         let mut contents: Vec<Value> = Vec::new();
         for m in &request.messages {
             match m.role {
                 MessageRole::System => {
-                    system_instruction = Some(json!({ "parts": [{ "text": m.text() }] }));
+                    system_parts.push(json!({ "text": m.text() }));
                 }
                 MessageRole::User => {
                     contents.push(json!({ "role": "user", "parts": encode_user_parts(m) }));
@@ -142,8 +142,8 @@ impl ProviderAdapter for GeminiAdapter {
             ));
         }
         let mut body = json!({ "contents": contents });
-        if let Some(s) = system_instruction {
-            body["systemInstruction"] = s;
+        if !system_parts.is_empty() {
+            body["systemInstruction"] = json!({ "parts": system_parts });
         }
         let mut generation_config = serde_json::Map::new();
         if let Some(t) = request.temperature {
@@ -265,11 +265,11 @@ fn encode_user_parts(message: &Message) -> Vec<Value> {
                         (media_type.clone(), data.clone())
                     }
                     autorouter_core::ImageSource::Url { url } => {
-                        parts.push(json!({ "fileData": { "fileUri": url } }));
+                        tracing::warn!(url = %url, "image URL cannot be sent to Gemini via fileData; skipping");
                         continue;
                     }
                     autorouter_core::ImageSource::FileId { id } => {
-                        parts.push(json!({ "fileData": { "fileUri": id } }));
+                        tracing::warn!(id = %id, "image FileId cannot be sent to Gemini via fileData; skipping");
                         continue;
                     }
                 };
@@ -318,6 +318,13 @@ fn encode_assistant_parts(message: &Message) -> Vec<Value> {
                 arguments_raw,
             } => parts.push(json!({
                 "functionCall": { "name": name, "args": arguments_raw, "id": id }
+            })),
+            ContentPart::ToolUse {
+                id,
+                name,
+                input,
+            } => parts.push(json!({
+                "functionCall": { "name": name, "args": input, "id": id }
             })),
             ContentPart::Reasoning { .. } => {
                 // Reasoning is response-only; skip silently when
@@ -542,6 +549,9 @@ fn decode_gemini_response(body: &Value) -> TranslateResult<UniversalResponse> {
             "STOP" => FinishReason::Stop,
             "MAX_TOKENS" => FinishReason::Length,
             "SAFETY" => FinishReason::Safety,
+            "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" => {
+                FinishReason::ContentFilter
+            }
             _ => FinishReason::Other,
         })
         .unwrap_or(FinishReason::Stop);

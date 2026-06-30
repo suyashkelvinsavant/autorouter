@@ -247,7 +247,7 @@ fn anthropic_event_with_index(
                 FinishReason::Stop => "end_turn",
                 FinishReason::Length => "max_tokens",
                 FinishReason::ToolCalls => "tool_use",
-                FinishReason::Safety => "refusal",
+                FinishReason::Safety | FinishReason::ContentFilter => "refusal",
                 _ => "end_turn",
             };
             let usage = usage.clone().unwrap_or_default();
@@ -360,23 +360,89 @@ fn gemini_payload(event: &StreamEvent) -> serde_json::Value {
 
 /// OpenAI Responses SSE: uses `event:` lines for delta types and
 /// `data:` for the payload. Trailing sentinel is `data: [DONE]\n\n`.
+///
+/// The OpenAI Responses wire format uses flat JSON objects
+/// (`{"type": "response.output_text.delta", "delta": "..."}`),
+/// not the Chat Completions `choices[0].delta` shape.
 pub fn encode_openai_responses_sse(event: &StreamEvent) -> String {
-    let payload = openai_payload(event);
+    let payload = openai_responses_payload(event);
+    // The `event:` line must agree with the payload's own `type` field
+    // so SSE consumers that route by either signal stay consistent.
     let event_name = match event {
+        StreamEvent::Start { .. } => "response.created",
         StreamEvent::TextDelta { .. } => "response.output_text.delta",
-        // The OpenAI Responses wire format distinguishes reasoning
-        // from output via a dedicated event name; emitting reasoning
-        // deltas under `response.output_text.delta` would route them
-        // into the consumer's output channel instead of its reasoning
-        // channel.
         StreamEvent::ReasoningDelta { .. } => "response.reasoning_text.delta",
-        StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallDelta { .. } => {
-            "response.function_call_arguments.delta"
-        }
+        StreamEvent::ToolCallStart { .. } => "response.output_item.added",
+        StreamEvent::ToolCallDelta { .. } => "response.function_call_arguments.delta",
+        StreamEvent::ToolCallEnd { .. } => "response.output_item.done",
         StreamEvent::Finish { .. } => "response.completed",
+        StreamEvent::Error { .. } => "error",
         _ => return format!("data: {}\n\n", payload),
     };
     format!("event: {}\ndata: {}\n\n", event_name, payload)
+}
+
+fn openai_responses_payload(event: &StreamEvent) -> serde_json::Value {
+    use serde_json::json;
+    match event {
+        StreamEvent::Start { id, model } => json!({
+            "type": "response.created",
+            "response": { "id": id, "model": model }
+        }),
+        StreamEvent::TextDelta { text } => json!({
+            "type": "response.output_text.delta",
+            "delta": text
+        }),
+        StreamEvent::ReasoningDelta { text } => json!({
+            "type": "response.reasoning_text.delta",
+            "delta": text
+        }),
+        StreamEvent::ToolCallStart { call } => json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": call.id,
+                "name": call.name,
+                "arguments": serde_json::to_string(&call.arguments).unwrap_or_default(),
+            }
+        }),
+        StreamEvent::ToolCallDelta {
+            id,
+            arguments_fragment,
+        } => json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": id,
+            "delta": arguments_fragment,
+        }),
+        StreamEvent::ToolCallEnd { id } => json!({
+            "type": "response.output_item.done",
+            "item": { "type": "function_call", "id": id }
+        }),
+        StreamEvent::Finish { reason, usage } => {
+            let status = match reason {
+                FinishReason::Stop => "completed",
+                FinishReason::Length => "incomplete",
+                _ => "completed",
+            };
+            let mut body = json!({
+                "type": "response.completed",
+                "response": { "status": status }
+            });
+            if let Some(u) = usage {
+                body["response"]["usage"] = json!({
+                    "input_tokens": u.tokens.input.unwrap_or(0),
+                    "output_tokens": u.tokens.output.unwrap_or(0),
+                });
+            }
+            body
+        }
+        StreamEvent::UsageDelta { .. } => json!({}),
+        StreamEvent::Error { message, code } => json!({
+            "type": "error",
+            "error": { "message": message, "code": code }
+        }),
+        _ => json!({}),
+    }
 }
 
 #[cfg(test)]
@@ -776,7 +842,8 @@ mod tests {
         assert_eq!(&s[..7], "event: ");
         assert!(s.contains("response.output_text.delta"));
         let v: serde_json::Value = serde_json::from_str(&extract_data(&s).unwrap()).unwrap();
-        assert_eq!(v["choices"][0]["delta"]["content"], "hi");
+        assert_eq!(v["type"], "response.output_text.delta");
+        assert_eq!(v["delta"], "hi");
     }
 
     #[test]
@@ -799,15 +866,18 @@ mod tests {
     }
 
     #[test]
-    fn openai_responses_sse_start_no_event() {
+    fn openai_responses_sse_start_event() {
         let event = StreamEvent::Start {
             id: "rsp_1".into(),
             model: "gpt-4o".into(),
         };
         let s = encode_openai_responses_sse(&event);
-        // Start has no event name → falls through to bare data:
-        assert_eq!(&s[..6], "data: ");
-        assert!(!s.contains("event: "));
+        // Start carries a `response.created` event line that matches its
+        // payload `type`, so SSE consumers routing by either signal agree.
+        assert!(s.contains("event: response.created\n"), "{}", s);
+        let v: serde_json::Value = serde_json::from_str(&extract_data(&s).unwrap()).unwrap();
+        assert_eq!(v["type"], "response.created");
+        assert_eq!(v["response"]["id"], "rsp_1");
     }
 
     /// Extract the `data:` portion from an SSE frame.

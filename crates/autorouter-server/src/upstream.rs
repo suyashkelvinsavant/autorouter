@@ -21,9 +21,10 @@ use tokio_util::bytes::Bytes;
 use autorouter_config::{ApiFormat, ProviderEntry, SecretStore};
 use autorouter_core::ProviderKind;
 use autorouter_translate::{
-    anthropic_tool_call_drop, decode_mock_response, gemini_cleanup_drop, openai_tool_call_drop,
-    streamer_drop, AnthropicAdapter, GeminiAdapter, OpenAiChatAdapter, ProviderAdapter,
-    TranslateError, TranslateResult, UpstreamResponse, UpstreamStream,
+    anthropic_finish_drop, anthropic_tool_call_drop, decode_mock_response, gemini_cleanup_drop,
+    openai_finish_emitted_drop, openai_tool_call_drop, streamer_drop, AnthropicAdapter,
+    GeminiAdapter, OpenAiChatAdapter, ProviderAdapter, TranslateError, TranslateResult,
+    UpstreamResponse, UpstreamStream,
 };
 
 /// Convert an `ApiFormat` to the `ProviderKind` used by the adapter
@@ -525,6 +526,8 @@ impl UpstreamClient for HttpUpstream {
                         openai_tool_call_drop(stream_request_ptr);
                         anthropic_tool_call_drop(stream_request_ptr);
                         gemini_cleanup_drop(stream_request_ptr);
+                        openai_finish_emitted_drop(stream_request_ptr);
+                        anthropic_finish_drop(stream_request_ptr);
                         yield Err(TranslateError::upstream(format!("upstream read: {e}")));
                         return;
                     }
@@ -539,6 +542,8 @@ impl UpstreamClient for HttpUpstream {
             openai_tool_call_drop(stream_request_ptr);
             anthropic_tool_call_drop(stream_request_ptr);
             gemini_cleanup_drop(stream_request_ptr);
+            openai_finish_emitted_drop(stream_request_ptr);
+            anthropic_finish_drop(stream_request_ptr);
         };
         let stream: UpstreamStream = Box::pin(decoded);
         Ok(stream)

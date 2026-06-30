@@ -97,7 +97,7 @@ fn build_router_inner(
                 post(routes::gemini_generate_content),
             )
             .route("/metrics", get(metrics_handler))
-            .with_state(state);
+            .with_state(state.clone());
         let ui_sub = crate::ui::build_sub_router(combined);
         gateway.merge(ui_sub)
     } else {
@@ -116,7 +116,7 @@ fn build_router_inner(
                 post(routes::gemini_generate_content),
             )
             .route("/metrics", get(metrics_handler))
-            .with_state(state)
+            .with_state(state.clone())
     };
 
     let router = router.layer(body_limit);
@@ -134,7 +134,7 @@ fn build_router_inner(
 
     if let Some(dist_dir) = static_ui_mod::resolve_dist_dir() {
         tracing::info!(path = %dist_dir.display(), "serving UI dist directory (AUTOROUTER_SERVE_UI=1)");
-        router.merge(static_ui_mod::build_ui_fallback(dist_dir))
+        router.merge(static_ui_mod::build_ui_fallback(dist_dir, state))
     } else {
         router
     }
