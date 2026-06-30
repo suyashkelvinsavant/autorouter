@@ -37,6 +37,9 @@ let bundles = "all";
 if (platform === "win32") bundles = "msi,nsis";
 else if (platform === "darwin") bundles = "app,dmg";
 else if (platform === "linux") bundles = "deb,appimage";
+// Allow the caller to override the bundle list without editing this file.
+// Example: $env:AUTOROUTER_BUNDLES="nsis"; node scripts/bundle.mjs
+if (process.env.AUTOROUTER_BUNDLES) bundles = process.env.AUTOROUTER_BUNDLES;
 
 console.log(`[bundle] target=${platform} bundles=${bundles}`);
 
