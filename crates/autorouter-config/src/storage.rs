@@ -258,7 +258,7 @@ impl Storage {
         let mut deleted = 0usize;
         let mut stmt = conn.prepare("DELETE FROM sessions WHERE id = ?1")?;
         for id in ids {
-            deleted += stmt.execute(params![id])? as usize;
+            deleted += stmt.execute(params![id])?;
         }
         Ok(deleted)
     }
@@ -276,7 +276,7 @@ impl Storage {
             "DELETE FROM sessions WHERE updated_at < ?1",
             params![cutoff_unix_secs],
         )?;
-        Ok(n as usize)
+        Ok(n)
     }
 
     /// Keep at most `max_sessions` session rows, retaining the most recently
@@ -300,7 +300,7 @@ impl Storage {
                )"#,
             params![max_sessions as i64],
         )?;
-        Ok(n as usize)
+        Ok(n)
     }
 
     /// M11: run a quick `PRAGMA integrity_check` on the database.

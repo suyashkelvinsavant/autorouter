@@ -492,7 +492,7 @@ async fn ui_events_includes_custom_provider_events() {
         .map(|e| e["provider"].as_str().unwrap_or(""))
         .collect();
     assert!(
-        providers.iter().any(|p| *p == "openrouter"),
+        providers.contains(&"openrouter"),
         "dashboard /ui/events must surface openrouter events alongside the built-in slots; got providers={providers:?}"
     );
 }

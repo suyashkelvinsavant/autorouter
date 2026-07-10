@@ -808,7 +808,7 @@ async fn call_upstream(
         .unwrap_or("");
     record_request(
         &request_ctx.source_provider.to_string(),
-        &provider_label(&decision),
+        &provider_label(decision),
         model,
     );
     let start = Instant::now();
@@ -2133,13 +2133,15 @@ async fn stream_inner_from_plan(
     };
     Ok(Sse::new(stream_to_events(
         Box::pin(tracked),
-        decision.source,
-        decision.openai_format,
-        decision.idle_timeout,
-        decision.request_id.to_string(),
-        decision.target_model.clone(),
-        conversation_key,
-        run_key,
+        StreamEventContext {
+            source: decision.source,
+            openai_format: decision.openai_format,
+            idle_timeout: decision.idle_timeout,
+            request_id: decision.request_id.to_string(),
+            target_model: decision.target_model.clone(),
+            conversation_key,
+            run_key,
+        },
     )))
 }
 
@@ -2350,8 +2352,7 @@ async fn prepare_stream_decision_with_format(
     })
 }
 
-fn stream_to_events(
-    stream: UpstreamStream,
+struct StreamEventContext {
     source: ProviderKind,
     openai_format: OpenAiWireFormat,
     idle_timeout: std::time::Duration,
@@ -2359,8 +2360,22 @@ fn stream_to_events(
     target_model: String,
     conversation_key: String,
     run_key: String,
+}
+
+fn stream_to_events(
+    stream: UpstreamStream,
+    context: StreamEventContext,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     async_stream::stream! {
+        let StreamEventContext {
+            source,
+            openai_format,
+            idle_timeout,
+            request_id,
+            target_model,
+            conversation_key,
+            run_key,
+        } = context;
         let mut s = stream;
         let mut errored = false;
         let mut responses_state = autorouter_translate::streaming::ResponsesSseState::new(

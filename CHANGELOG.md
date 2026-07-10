@@ -2,6 +2,13 @@
 
 All notable changes to AutoRouter are documented here.
 
+## [0.1.1] - 2026-07-11
+
+### Fixed
+
+- Restored a clean strict-Clippy CI baseline across the workspace.
+- Simplified streaming and session-support code without changing the public gateway behavior.
+
 ## [0.1.0] - 2026-07-10
 
 ### Added
@@ -17,4 +24,5 @@ All notable changes to AutoRouter are documented here.
 - Optional bearer authentication for every gateway and dashboard route.
 - API keys are resolved from environment variables or the platform secret store; they are not committed to configuration.
 
+[0.1.1]: ../../releases/tag/v0.1.1
 [0.1.0]: ../../releases/tag/v0.1.0

@@ -1274,9 +1274,7 @@ async fn import_config_triggers_supervisor_rebind() {
     let bind_b = format!("127.0.0.1:{port_b}");
 
     // Use a unique temp dir (no `tempfile` crate available as dev-dep).
-    let dir = std::path::PathBuf::from(
-        std::env::temp_dir().join(format!("autorouter_test_import_{port_a}")),
-    );
+    let dir = std::env::temp_dir().join(format!("autorouter_test_import_{port_a}"));
     let _ = std::fs::create_dir_all(&dir);
     let cfg_path = dir.join("config.toml");
     let initial_toml = format!(

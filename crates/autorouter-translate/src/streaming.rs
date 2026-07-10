@@ -213,37 +213,6 @@ static CALL_ID_MAP: LazyLock<Mutex<HashMap<String, CallMeta>>> =
 static LAST_SIG_PER_RUN: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Determine whether a tool result's output indicates the command actually
-/// completed (produced real output) vs. merely yielded with "Process running"
-/// and empty output (which means the command is still in-flight and the model
-/// got no useful feedback).
-///
-/// We clear loop-guard counters only for genuinely completed commands. A
-/// "Process running" result with empty output is NOT a completion — it's a
-/// timeout/yield that gives the model zero information, so the loop counter
-/// must persist to catch the inevitable retry.
-fn is_real_completion(output: &str) -> bool {
-    // "Process running" means exec_command yielded at yield_time_ms without
-    // the command finishing. The output is empty or near-empty.
-    if output.contains("Process running with session ID") {
-        return false;
-    }
-    // "aborted by user" is also not a real completion.
-    if output.contains("aborted by user") {
-        return false;
-    }
-    true
-}
-
-/// Clear the loop-guard counters for tool calls that produced results
-/// (i.e. did NOT hang). Call this before streaming a new request when
-/// the request body contains `function_call_output` items.
-///
-/// IMPORTANT: Only clears when the tool result indicates the command actually
-/// COMPLETED (has real output, not "Process running" with empty output).
-/// A yielded-but-still-running command gives the model no useful feedback,
-/// so the loop counter must persist to catch the retry.
-
 /// Look up the stored tool-call metadata for a `call_id`.
 ///
 /// Returns `(signature, run_key, arguments)` if the call was previously
@@ -659,7 +628,7 @@ pub struct ResponsesSseState {
 
 impl ResponsesSseState {
     pub fn new(response_id: String, model: String, conversation_key: String) -> Self {
-        let message_item_id = format!("{}__msg_0", &response_id);
+        let message_item_id = format!("{}__msg_0", response_id);
         Self {
             response_id,
             model,

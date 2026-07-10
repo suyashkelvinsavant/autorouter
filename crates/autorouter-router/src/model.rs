@@ -126,7 +126,7 @@ impl ModelCapability {
         if needs.tools && !self.supports_tools {
             return -1;
         }
-        if needs.min_context > 0 && (self.context_window as u32) < needs.min_context {
+        if needs.min_context > 0 && self.context_window < needs.min_context {
             return -1;
         }
         let mut score = 0;

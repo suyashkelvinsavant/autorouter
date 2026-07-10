@@ -222,7 +222,7 @@ pub struct RoutingConfig {
 /// background behaviour that touches the network or the filesystem
 /// beyond the core translate-and-forward loop. All default to **off**
 /// so a fresh install never makes unexpected outbound connections.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeaturesConfig {
     /// When `true`, the gateway periodically scrapes
@@ -234,12 +234,4 @@ pub struct FeaturesConfig {
     /// is cached at `<data_dir>/models_data.json` and refreshed at most
     /// once per 24 hours.
     pub model_scraping: bool,
-}
-
-impl Default for FeaturesConfig {
-    fn default() -> Self {
-        Self {
-            model_scraping: false,
-        }
-    }
 }

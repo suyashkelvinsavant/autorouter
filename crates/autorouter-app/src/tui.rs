@@ -125,12 +125,11 @@ fn handle_key_event(
     // Esc/Ctrl-C/Q to quit if not in edit mode
     let in_edit =
         tui_state.provider_editing || tui_state.routing_editing || tui_state.settings_editing;
-    if !in_edit {
-        if key.code == KeyCode::Char('q')
-            || key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            return true;
-        }
+    if !in_edit
+        && (key.code == KeyCode::Char('q')
+            || key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        return true;
     }
 
     if tui_state.provider_editing {
@@ -279,10 +278,8 @@ fn handle_key_event(
                     tui_state.logs_scroll_offset -= 1;
                 }
             }
-            5 => {
-                if tui_state.settings_selected_idx > 0 {
-                    tui_state.settings_selected_idx -= 1;
-                }
+            5 if tui_state.settings_selected_idx > 0 => {
+                tui_state.settings_selected_idx -= 1;
             }
             _ => {}
         },
@@ -306,10 +303,8 @@ fn handle_key_event(
                         tui_state.logs_scroll_offset += 1;
                     }
                 }
-                5 => {
-                    if tui_state.settings_selected_idx < 6 {
-                        tui_state.settings_selected_idx += 1;
-                    }
+                5 if tui_state.settings_selected_idx < 6 => {
+                    tui_state.settings_selected_idx += 1;
                 }
                 _ => {}
             }
@@ -401,7 +396,7 @@ fn handle_key_event(
                     tokio::spawn(async move {
                         let client = reqwest::Client::new();
                         let _ = client
-                            .get(&format!(
+                            .get(format!(
                                 "http://{}/healthz",
                                 state_clone.current_config().server.bind
                             ))
@@ -450,23 +445,21 @@ fn handle_key_event(
                 tui_state.active_tab = 0;
             }
         }
-        KeyCode::Char('a') | KeyCode::Char('A') => {
-            if tui_state.active_tab == 2 {
-                update_config_and_rebuild(state, ui_state, |cfg| {
-                    let new_rule = json!({
-                        "name": format!("rule-{}", cfg.routing.rules.len() + 1),
-                        "priority": 50,
-                        "match_tags_any": [],
-                        "target": {
-                            "provider": "openai",
-                            "model": "gpt-5",
-                            "headers": {}
-                        }
-                    });
-                    cfg.routing.rules.push(new_rule);
+        KeyCode::Char('a') | KeyCode::Char('A') if tui_state.active_tab == 2 => {
+            update_config_and_rebuild(state, ui_state, |cfg| {
+                let new_rule = json!({
+                    "name": format!("rule-{}", cfg.routing.rules.len() + 1),
+                    "priority": 50,
+                    "match_tags_any": [],
+                    "target": {
+                        "provider": "openai",
+                        "model": "gpt-5",
+                        "headers": {}
+                    }
                 });
-                tui_state.show_message("Added default rule");
-            }
+                cfg.routing.rules.push(new_rule);
+            });
+            tui_state.show_message("Added default rule");
         }
         _ => {}
     }
@@ -1028,8 +1021,7 @@ fn render_logs(
     let slice_end = logs.len().saturating_sub(offset);
     let slice_start = slice_end.saturating_sub(display_rows);
 
-    let mut row = y_start + 3;
-    for i in slice_start..slice_end {
+    for (row, i) in (y_start + 3..).zip(slice_start..slice_end) {
         if i >= logs.len() {
             break;
         }
@@ -1051,7 +1043,6 @@ fn render_logs(
             ResetColor
         )?;
         queue!(stdout, Print(format!("[{}] {}", log.target, log.message)))?;
-        row += 1;
     }
 
     Ok(())

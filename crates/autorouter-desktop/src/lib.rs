@@ -948,8 +948,9 @@ fn cmd_analytics(state: tauri::State<DesktopState>) -> Result<Value, String> {
     // cache_write, reasoning). Mirrors the HTTP /ui/analytics
     // endpoint so the dashboard renders the same numbers through
     // either transport.
-    let mut by_provider: BTreeMap<String, (u64, u64, u64, u64, u64, u64, u64)> = BTreeMap::new();
-    let mut by_model: BTreeMap<String, (u64, u64, u64, u64, u64, u64, u64)> = BTreeMap::new();
+    type AnalyticsBucket = (u64, u64, u64, u64, u64, u64, u64);
+    let mut by_provider: BTreeMap<String, AnalyticsBucket> = BTreeMap::new();
+    let mut by_model: BTreeMap<String, AnalyticsBucket> = BTreeMap::new();
     for e in &all_events {
         total_requests += 1;
         if e.status >= 400 {
