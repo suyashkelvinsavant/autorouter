@@ -1,0 +1,21 @@
+[Unit]
+Description=AutoRouter - AI Gateway Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust the user, working directory, and binary path to match your install.
+User=autorouter
+WorkingDirectory=/opt/autorouter
+# Optional environment file (e.g. AUTOROUTER_BIND). The leading "-" makes it
+# non-fatal if absent.
+EnvironmentFile=-/etc/autorouter/autorouter.env
+ExecStart=/usr/local/bin/autorouter
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+# Build artifacts
+/target
+**/target
+**/node_modules
+**/dist
+
+# macOS / Linux noise
+.DS_Store
+Thumbs.db
+
+# Local editor / scratch
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build / bundle outputs
+target/release/bundle/
+
+# Local SQLite store
+*.db
+*.db-shm
+*.db-wal
+
+# Local credentials (use `.env.example` for documented placeholders)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Vite dev cache
+.vite/
+
+# Local scratch / verification configs
+/tmp/
+
+# Local Codex CLI sandbox config (machine-specific, never commit)
+.codex/
+
+# Build / runtime logs
+*.log
+ui/tmp/
+
+#Command Code
+.commandcode
+
+# AI Review Report
+*review_report.md
+
+# Graphify Outputs
+/graphify-out/
+
+# Kilo
+.kilo

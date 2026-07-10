@@ -1,0 +1,29 @@
+[package]
+name = "autorouter-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Application wiring and entry point for AutoRouter."
+
+[[bin]]
+name = "autorouter"
+path = "src/main.rs"
+
+[dependencies]
+autorouter-translate = { path = "../autorouter-translate" }
+autorouter-config = { path = "../autorouter-config" }
+autorouter-server = { path = "../autorouter-server" }
+autorouter-router = { path = "../autorouter-router" }
+autorouter-observability = { path = "../autorouter-observability" }
+autorouter-core = { path = "../autorouter-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+crossterm = "0.28"
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+
+

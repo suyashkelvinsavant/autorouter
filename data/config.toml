@@ -1,0 +1,43 @@
+[server]
+bind = "127.0.0.1:4073"
+max_body_bytes = 67108864
+
+[providers.custom.tokenrouter]
+display_name = "TokenRouter"
+base_url = "https://api.tokenrouter.com/v1"
+api_key_secret_id = "env:TOKENROUTER_API_KEY"
+enabled = true
+
+# Safety-net fallback used when the TokenRouter balance is exhausted.
+# OpenRouter is OpenAI-compatible (same chat/responses wire format as
+# TokenRouter), so routing a failed TokenRouter request here changes
+# nothing on the caller's side — the API shape is identical. The free
+# models keep upstream coding agents (e.g. Codex) working without spend.
+[providers.custom.openrouter_free]
+display_name = "OpenRouter Free Fallback"
+base_url = "https://openrouter.ai/api/v1"
+api_key_secret_id = "env:OPENROUTER_API_KEY"
+enabled = true
+model_allowlist = [
+    "openai/gpt-oss-20b:free",
+    "qwen/qwen3-coder:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "deepseek/deepseek-chat-v3.1:free",
+]
+
+[providers.anthropic]
+display_name = "OpenRouter (Anthropic-compatible)"
+base_url = "https://openrouter.ai/api"
+api_key_secret_id = "env:OPENROUTER_API_KEY"
+enabled = true
+
+[providers.gemini]
+display_name = "Google Gemini"
+base_url = "https://generativelanguage.googleapis.com"
+api_key_secret_id = "env:GOOGLE_API_KEY"
+enabled = true
+
+[defaults]
+default_provider = "tokenrouter"
+default_model = "deepseek/deepseek-v4-pro"
+stream_by_default = true
